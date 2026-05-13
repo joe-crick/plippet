@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::injector::PasteBackend;
+use crate::injector::{PasteBackend, PasteKeys, PasteMode};
 use crate::picker::{PickerKind, PickerOption};
 use crate::snippet::resolve_snippet;
 
@@ -34,6 +34,12 @@ enum Commands {
 
         #[arg(long, value_enum, default_value_t = PasteBackend::Auto)]
         paste_backend: PasteBackend,
+
+        #[arg(long, value_enum, default_value_t = PasteKeys::CtrlV)]
+        paste_keys: PasteKeys,
+
+        #[arg(long, value_enum, default_value_t = PasteMode::Chord)]
+        paste_mode: PasteMode,
     },
     List,
     Insert {
@@ -44,6 +50,12 @@ enum Commands {
 
         #[arg(long, value_enum, default_value_t = PasteBackend::Auto)]
         paste_backend: PasteBackend,
+
+        #[arg(long, value_enum, default_value_t = PasteKeys::CtrlV)]
+        paste_keys: PasteKeys,
+
+        #[arg(long, value_enum, default_value_t = PasteMode::Chord)]
+        paste_mode: PasteMode,
     },
     Check {
         #[arg(long)]
@@ -62,13 +74,17 @@ fn main() -> Result<()> {
             picker,
             paste,
             paste_backend,
-        } => pick_command(picker, paste, paste_backend),
+            paste_keys,
+            paste_mode,
+        } => pick_command(picker, paste, paste_backend, paste_keys, paste_mode),
         Commands::List => list_command(),
         Commands::Insert {
             key,
             paste,
             paste_backend,
-        } => insert_command(&key, paste, paste_backend),
+            paste_keys,
+            paste_mode,
+        } => insert_command(&key, paste, paste_backend, paste_keys, paste_mode),
         Commands::Check { strict } => check_command(strict),
         #[cfg(feature = "gui")]
         Commands::Edit => edit_command(),
@@ -87,7 +103,13 @@ fn load_config() -> Result<Config> {
     Ok(config)
 }
 
-fn pick_command(kind: PickerKind, paste: bool, backend: PasteBackend) -> Result<()> {
+fn pick_command(
+    kind: PickerKind,
+    paste: bool,
+    backend: PasteBackend,
+    keys: PasteKeys,
+    mode: PasteMode,
+) -> Result<()> {
     let config = load_config()?;
 
     let resolved_kind = match kind {
@@ -117,7 +139,7 @@ fn pick_command(kind: PickerKind, paste: bool, backend: PasteBackend) -> Result<
     clipboard::copy_to_clipboard(&text)?;
 
     if paste {
-        injector::paste(backend)?;
+        injector::paste(backend, keys, mode, &text)?;
     }
 
     Ok(())
@@ -133,7 +155,13 @@ fn list_command() -> Result<()> {
     Ok(())
 }
 
-fn insert_command(key: &str, paste: bool, backend: PasteBackend) -> Result<()> {
+fn insert_command(
+    key: &str,
+    paste: bool,
+    backend: PasteBackend,
+    keys: PasteKeys,
+    mode: PasteMode,
+) -> Result<()> {
     let config = load_config()?;
 
     let selected = config
@@ -146,7 +174,7 @@ fn insert_command(key: &str, paste: bool, backend: PasteBackend) -> Result<()> {
     clipboard::copy_to_clipboard(&text)?;
 
     if paste {
-        injector::paste(backend)?;
+        injector::paste(backend, keys, mode, &text)?;
     }
 
     Ok(())

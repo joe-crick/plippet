@@ -146,9 +146,9 @@ cp examples/snippets.toml ~/.config/plippet/snippets.toml
 ## Commands
 
 ```
-plippet pick   [--picker auto|builtin|fuzzel|wofi|rofi|bemenu] [--paste] [--paste-backend auto|wtype|portal|xdotool]
+plippet pick   [--picker auto|builtin|fuzzel|wofi|rofi|bemenu] [--paste] [--paste-backend auto|wtype|portal|xdotool] [--paste-keys ctrl-v|ctrl-shift-v] [--paste-mode chord|type]
 plippet list
-plippet insert <key> [--paste] [--paste-backend auto|wtype|portal|xdotool]
+plippet insert <key> [--paste] [--paste-backend auto|wtype|portal|xdotool] [--paste-keys ctrl-v|ctrl-shift-v] [--paste-mode chord|type]
 plippet check  [--strict]
 plippet edit                          # requires the `gui` feature (default-on)
 ```
@@ -157,6 +157,20 @@ plippet edit                          # requires the `gui` feature (default-on)
   pasted if `--paste`). Cancelling the picker (ESC) exits 0 silently.
 - **list** — print all snippets as `key<TAB>name`.
 - **insert** — resolve a snippet by key and copy it (and paste if `--paste`).
+- **`--paste-keys`** (on `pick` and `insert`) — choose the synthesized
+  keystroke. Default `ctrl-v` works in browsers, editors, chat apps, and
+  most GUI text inputs. Pass `ctrl-shift-v` if your binding is meant to
+  paste into a terminal (GNOME Terminal, Foot, Kitty, Alacritty all use
+  Ctrl+Shift+V for paste). **Note:** mutter on GNOME drops the Shift
+  modifier from synthesized two-modifier chords, so `ctrl-shift-v` won't
+  actually reach the focused window there — use `--paste-mode type` for
+  GNOME terminals instead.
+- **`--paste-mode`** (on `pick` and `insert`) — how the snippet reaches
+  the focused window. Default `chord` synthesizes a paste shortcut and is
+  fast. `type` types each character of the snippet directly via key
+  synthesis — slower for long snippets and ASCII-only, but works in any
+  focused text input regardless of paste bindings (terminals, password
+  fields, search boxes) and sidesteps mutter's chord-dropping bug.
 - **check** — validate the config, report which backend `auto` will use, and
   list tool availability. Exits 0 as long as the config is valid. Pass
   `--strict` to also fail when required runtime tools (currently just
@@ -188,15 +202,33 @@ absent but everything else works unchanged.
 
 ### GNOME (Settings → Keyboard → Custom Shortcuts)
 
-Bind a shortcut (e.g. `Super+;`) to:
+GNOME's custom shortcuts run the command in a non-interactive, non-login
+shell — `~/.bashrc` is not sourced, so `~/.local/bin/` may not be on
+`$PATH`. **Use the absolute path to the binary** in your binding:
 
 ```
-plippet pick --paste
+/home/<you>/.local/bin/plippet pick --paste
 ```
 
 `--picker auto` (default) detects GNOME Wayland's lack of `wlr-layer-shell`
-and uses the built-in egui picker — no external dependency to install.
-`--paste-backend auto` picks the portal backend.
+and uses the built-in egui picker — no external picker to install.
+`--paste-backend auto` picks the portal backend (you'll see a one-time
+"plippet wants to control your keyboard" dialog the first time — approve
+it; the grant persists via a restore token).
+
+**If you want to paste into a terminal on GNOME**, the chord approach
+won't work — mutter's portal silently drops the Shift modifier from
+synthesized two-modifier chords, and terminals don't accept plain Ctrl+V
+as paste. Use `--paste-mode type` instead, which types the snippet
+character by character:
+
+```
+/home/<you>/.local/bin/plippet pick --paste --paste-mode type
+```
+
+You can bind two different hotkeys — one for GUI inputs (default chord
+mode, fast) and one for terminals (`--paste-mode type`, slower but works
+everywhere).
 
 ### KDE Plasma (System Settings → Shortcuts → Custom Shortcuts)
 

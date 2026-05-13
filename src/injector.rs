@@ -36,7 +36,26 @@ pub enum PasteKeys {
     CtrlShiftV,
 }
 
-// X11 keysym constants for the keys we synthesize.
+/// How to deliver the snippet to the focused window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PasteMode {
+    /// Synthesize a paste shortcut (Ctrl+V by default; see `--paste-keys`).
+    /// Fast, but relies on the focused app having that paste binding AND on
+    /// the compositor not intercepting the chord. Empirically Ctrl+Shift+V
+    /// is dropped by mutter on GNOME.
+    Chord,
+    /// Type each character of the snippet via key synthesis. Slower for
+    /// long snippets but works in any focused text input regardless of
+    /// paste bindings — terminals, password fields, search boxes, etc.
+    /// ASCII printable characters + newline + tab only in v1; non-ASCII
+    /// (emoji, accented letters) is rejected with an error.
+    Type,
+}
+
+// X11 keysym constants for the keys we synthesize via the portal. We use
+// keysyms (not evdev keycodes) on GNOME: empirically mutter's portal
+// implementation of `notify_keyboard_keycode` doesn't route the events
+// reliably, while `notify_keyboard_keysym` does.
 const KEYSYM_CONTROL_L: i32 = 0xffe3;
 const KEYSYM_SHIFT_L: i32 = 0xffe1;
 const KEYSYM_V: i32 = 0x0076;
@@ -70,20 +89,38 @@ impl PasteKeys {
     }
 }
 
-pub fn paste(backend: PasteBackend, keys: PasteKeys) -> Result<()> {
+pub fn paste(
+    backend: PasteBackend,
+    keys: PasteKeys,
+    mode: PasteMode,
+    text: &str,
+) -> Result<()> {
     // Give the compositor time both to observe the new clipboard selection
-    // and to transfer keyboard focus from the picker window back to the
-    // previously-focused app. 25 ms is fine on wlroots compositors but
-    // turns out to be too tight on GNOME, where focus transfer after a
-    // regular xdg-shell window closes can take noticeably longer. 150 ms
-    // is still imperceptible and reliable across compositors observed so far.
-    thread::sleep(Duration::from_millis(150));
+    // and — more importantly on GNOME — to transfer keyboard focus from
+    // the picker window back to the previously-focused app. 25 ms is fine
+    // on wlroots compositors; GNOME's mutter takes substantially longer
+    // to settle focus after a regular xdg-shell window closes. 500 ms is
+    // still imperceptible as a hotkey latency and reliably catches the
+    // GNOME case observed so far.
+    thread::sleep(Duration::from_millis(500));
 
-    match resolve(backend) {
-        PasteBackend::Wtype => paste_wtype(keys),
-        PasteBackend::Portal => paste_portal(keys),
-        PasteBackend::Xdotool => paste_xdotool(keys),
-        PasteBackend::Auto => unreachable!("resolve() never returns Auto"),
+    let resolved = resolve(backend);
+    match mode {
+        PasteMode::Chord => match resolved {
+            PasteBackend::Wtype => paste_chord_wtype(keys),
+            PasteBackend::Portal => paste_chord_portal(keys),
+            PasteBackend::Xdotool => paste_chord_xdotool(keys),
+            PasteBackend::Auto => unreachable!("resolve() never returns Auto"),
+        },
+        PasteMode::Type => {
+            validate_typeable(text)?;
+            match resolved {
+                PasteBackend::Wtype => paste_text_wtype(text),
+                PasteBackend::Portal => paste_text_portal(text),
+                PasteBackend::Xdotool => paste_text_xdotool(text),
+                PasteBackend::Auto => unreachable!("resolve() never returns Auto"),
+            }
+        }
     }
 }
 
@@ -141,9 +178,9 @@ fn auto_from_env(
     }
 }
 
-fn paste_wtype() -> Result<()> {
+fn paste_chord_wtype(keys: PasteKeys) -> Result<()> {
     let status = Command::new("wtype")
-        .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
+        .args(keys.wtype_args())
         .status()
         .context(
             "failed to spawn wtype; install it (wlroots-based compositors only) \
@@ -156,9 +193,9 @@ fn paste_wtype() -> Result<()> {
     Ok(())
 }
 
-fn paste_xdotool() -> Result<()> {
+fn paste_chord_xdotool(keys: PasteKeys) -> Result<()> {
     let status = Command::new("xdotool")
-        .args(["key", "ctrl+v"])
+        .args(["key", keys.xdotool_key()])
         .status()
         .context("failed to spawn xdotool; install xdotool for X11 paste")?;
     if !status.success() {
@@ -167,21 +204,55 @@ fn paste_xdotool() -> Result<()> {
     Ok(())
 }
 
-fn paste_portal() -> Result<()> {
+fn paste_chord_portal(keys: PasteKeys) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("failed to build tokio runtime for portal call")?;
-    runtime.block_on(paste_portal_async())
+    runtime.block_on(paste_chord_portal_async(keys))
 }
 
-async fn paste_portal_async() -> Result<()> {
+fn paste_text_wtype(text: &str) -> Result<()> {
+    // `wtype -- <text>` types its arguments directly (handling shift / unicode
+    // internally). The `--` terminates option parsing so a snippet beginning
+    // with `-` doesn't get misinterpreted as a flag.
+    let status = Command::new("wtype")
+        .arg("--")
+        .arg(text)
+        .status()
+        .context("failed to spawn wtype for type-mode paste")?;
+    if !status.success() {
+        anyhow::bail!("wtype exited with status {status}");
+    }
+    Ok(())
+}
+
+fn paste_text_xdotool(text: &str) -> Result<()> {
+    // A small per-character delay avoids xdotool overrunning the X server's
+    // input queue for long snippets.
+    let status = Command::new("xdotool")
+        .args(["type", "--delay", "5", "--", text])
+        .status()
+        .context("failed to spawn xdotool for type-mode paste")?;
+    if !status.success() {
+        anyhow::bail!("xdotool exited with status {status}");
+    }
+    Ok(())
+}
+
+fn paste_text_portal(text: &str) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for portal call")?;
+    runtime.block_on(paste_text_portal_async(text))
+}
+
+async fn paste_chord_portal_async(keys: PasteKeys) -> Result<()> {
     use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
     use ashpd::desktop::PersistMode;
 
-    // X11 keysyms for Ctrl+V.
-    const KEYSYM_CONTROL_L: i32 = 0xffe3;
-    const KEYSYM_V: i32 = 0x0076;
+    let (modifiers, main_key) = keys.keysyms();
 
     let proxy = RemoteDesktop::new()
         .await
@@ -216,23 +287,124 @@ async fn paste_portal_async() -> Result<()> {
         }
     }
 
+    // Press modifiers in order, press+release the main key, then release
+    // modifiers in reverse order. A small inter-call pause keeps mutter
+    // from coalescing/reordering the events under fast async chains.
+    let step = Duration::from_millis(10);
+    for &m in modifiers {
+        proxy
+            .notify_keyboard_keysym(&session, m, KeyState::Pressed)
+            .await
+            .with_context(|| format!("portal modifier keysym {m:#x} press failed"))?;
+        thread::sleep(step);
+    }
     proxy
-        .notify_keyboard_keysym(&session, KEYSYM_CONTROL_L, KeyState::Pressed)
+        .notify_keyboard_keysym(&session, main_key, KeyState::Pressed)
         .await
-        .context("portal Ctrl down failed")?;
+        .with_context(|| format!("portal main keysym {main_key:#x} press failed"))?;
+    thread::sleep(step);
     proxy
-        .notify_keyboard_keysym(&session, KEYSYM_V, KeyState::Pressed)
+        .notify_keyboard_keysym(&session, main_key, KeyState::Released)
         .await
-        .context("portal V down failed")?;
-    proxy
-        .notify_keyboard_keysym(&session, KEYSYM_V, KeyState::Released)
-        .await
-        .context("portal V up failed")?;
-    proxy
-        .notify_keyboard_keysym(&session, KEYSYM_CONTROL_L, KeyState::Released)
-        .await
-        .context("portal Ctrl up failed")?;
+        .with_context(|| format!("portal main keysym {main_key:#x} release failed"))?;
+    thread::sleep(step);
+    for &m in modifiers.iter().rev() {
+        proxy
+            .notify_keyboard_keysym(&session, m, KeyState::Released)
+            .await
+            .with_context(|| format!("portal modifier keysym {m:#x} release failed"))?;
+        thread::sleep(step);
+    }
 
+    Ok(())
+}
+
+async fn paste_text_portal_async(text: &str) -> Result<()> {
+    use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
+    use ashpd::desktop::PersistMode;
+
+    let proxy = RemoteDesktop::new()
+        .await
+        .context("failed to connect to XDG Desktop Portal; is xdg-desktop-portal running?")?;
+
+    let session = proxy
+        .create_session()
+        .await
+        .context("portal CreateSession failed")?;
+
+    let token = load_token().ok();
+    proxy
+        .select_devices(
+            &session,
+            DeviceType::Keyboard.into(),
+            token.as_deref(),
+            PersistMode::ExplicitlyRevoked,
+        )
+        .await
+        .context("portal SelectDevices failed")?;
+
+    let request = proxy.start(&session, None).await.context(
+        "portal Start failed; the user must approve the keyboard-control prompt the first time",
+    )?;
+    let selected = request
+        .response()
+        .context("portal returned no SelectedDevices")?;
+
+    if let Some(new_token) = selected.restore_token() {
+        if let Err(e) = save_token(new_token) {
+            eprintln!("warning: failed to persist portal restore token: {e:#}");
+        }
+    }
+
+    // Type each character. A short per-key pause matches what wtype/xdotool
+    // do internally and keeps fast typers (and slow apps) in sync.
+    let step = Duration::from_millis(3);
+    for c in text.chars() {
+        let keysym = char_to_keysym(c).ok_or_else(|| {
+            anyhow!("character {c:?} (U+{:04X}) not supported in type mode", c as u32)
+        })?;
+        proxy
+            .notify_keyboard_keysym(&session, keysym, KeyState::Pressed)
+            .await
+            .with_context(|| format!("portal keysym {keysym:#x} press failed"))?;
+        thread::sleep(step);
+        proxy
+            .notify_keyboard_keysym(&session, keysym, KeyState::Released)
+            .await
+            .with_context(|| format!("portal keysym {keysym:#x} release failed"))?;
+        thread::sleep(step);
+    }
+
+    Ok(())
+}
+
+/// Map a character to its X11 keysym for type-mode synthesis. Returns
+/// `None` for characters we won't try to type (non-ASCII, control chars
+/// other than newline/tab).
+///
+/// We send the *shifted-form* keysym directly (e.g. 0x41 for `A`, 0x21 for
+/// `!`) rather than emulating a Shift+key chord — most compositors interpret
+/// the resulting key event as the literal character, sidestepping the
+/// modifier-handling bugs that bite chord synthesis.
+fn char_to_keysym(c: char) -> Option<i32> {
+    match c {
+        '\n' => Some(0xff0d), // Return
+        '\t' => Some(0xff09), // Tab
+        c if c.is_ascii() && (c as u32) >= 0x20 && (c as u32) <= 0x7e => Some(c as i32),
+        _ => None,
+    }
+}
+
+fn validate_typeable(text: &str) -> Result<()> {
+    for (i, c) in text.chars().enumerate() {
+        if char_to_keysym(c).is_none() {
+            anyhow::bail!(
+                "character {c:?} (U+{:04X}) at position {i} is not supported in type mode; \
+                 use --paste-mode chord or remove the character from the snippet",
+                c as u32
+            );
+        }
+    }
     Ok(())
 }
 
@@ -341,5 +513,92 @@ mod tests {
             auto_from_env(Some("GNOME"), None, Some("wayland-0")).0,
             PasteBackend::Portal
         );
+    }
+
+    // ----- PasteKeys ------------------------------------------------------
+
+    #[test]
+    fn paste_keys_ctrl_v_uses_only_control_modifier() {
+        let (modifiers, key) = PasteKeys::CtrlV.keysyms();
+        assert_eq!(modifiers, &[KEYSYM_CONTROL_L]);
+        assert_eq!(key, KEYSYM_V);
+    }
+
+    #[test]
+    fn paste_keys_ctrl_shift_v_includes_shift() {
+        let (modifiers, key) = PasteKeys::CtrlShiftV.keysyms();
+        assert_eq!(modifiers, &[KEYSYM_CONTROL_L, KEYSYM_SHIFT_L]);
+        assert_eq!(key, KEYSYM_V);
+    }
+
+    #[test]
+    fn paste_keys_wtype_args_match_combo() {
+        assert_eq!(
+            PasteKeys::CtrlV.wtype_args(),
+            &["-M", "ctrl", "-k", "v", "-m", "ctrl"]
+        );
+        assert_eq!(
+            PasteKeys::CtrlShiftV.wtype_args(),
+            &[
+                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"
+            ]
+        );
+    }
+
+    #[test]
+    fn paste_keys_xdotool_strings() {
+        assert_eq!(PasteKeys::CtrlV.xdotool_key(), "ctrl+v");
+        assert_eq!(PasteKeys::CtrlShiftV.xdotool_key(), "ctrl+shift+v");
+    }
+
+    // ----- PasteMode::Type: char_to_keysym + validate_typeable -----------
+
+    #[test]
+    fn keysym_for_ascii_letters() {
+        assert_eq!(char_to_keysym('a'), Some(0x61));
+        assert_eq!(char_to_keysym('z'), Some(0x7a));
+        assert_eq!(char_to_keysym('A'), Some(0x41));
+        assert_eq!(char_to_keysym('Z'), Some(0x5a));
+    }
+
+    #[test]
+    fn keysym_for_ascii_digits_and_symbols() {
+        assert_eq!(char_to_keysym('0'), Some(0x30));
+        assert_eq!(char_to_keysym('9'), Some(0x39));
+        assert_eq!(char_to_keysym('!'), Some(0x21));
+        assert_eq!(char_to_keysym(' '), Some(0x20));
+        assert_eq!(char_to_keysym('~'), Some(0x7e));
+    }
+
+    #[test]
+    fn keysym_for_whitespace_specials() {
+        assert_eq!(char_to_keysym('\n'), Some(0xff0d));
+        assert_eq!(char_to_keysym('\t'), Some(0xff09));
+    }
+
+    #[test]
+    fn keysym_rejects_unsupported_chars() {
+        assert_eq!(char_to_keysym('é'), None);
+        assert_eq!(char_to_keysym('🙂'), None);
+        assert_eq!(char_to_keysym('\u{7f}'), None); // DEL
+        assert_eq!(char_to_keysym('\u{1f}'), None); // unit separator
+    }
+
+    #[test]
+    fn validate_typeable_accepts_pure_ascii() {
+        validate_typeable("Hello, World!\nLine 2\twith tab.").unwrap();
+    }
+
+    #[test]
+    fn validate_typeable_rejects_non_ascii_with_position() {
+        let err = validate_typeable("Hello, café").unwrap_err().to_string();
+        assert!(err.contains("'é'"), "{err}");
+        // "Hello, café" — é is char index 10 (H=0, e=1, …, f=9, é=10).
+        assert!(err.contains("position 10"), "{err}");
+    }
+
+    #[test]
+    fn validate_typeable_accepts_empty() {
+        validate_typeable("").unwrap();
     }
 }
