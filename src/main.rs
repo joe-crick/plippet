@@ -110,39 +110,46 @@ fn pick_command(
     keys: PasteKeys,
     mode: PasteMode,
 ) -> Result<()> {
-    let config = load_config()?;
-
     let resolved_kind = match kind {
         PickerKind::Auto => picker::auto_pick()?,
         explicit => explicit,
     };
 
-    let options: Vec<PickerOption> = config
-        .snippet
-        .iter()
-        .map(|s| PickerOption {
-            label: format!("{}\t{}", s.key, s.name),
-        })
-        .collect();
-
-    let Some(selected_key) = picker::pick_with(resolved_kind, &options)? else {
-        return Ok(());
+    let target = if paste {
+        injector::capture_target(backend)?
+    } else {
+        None
     };
 
-    let selected = config
-        .snippet
-        .iter()
-        .find(|s| s.key == selected_key)
-        .with_context(|| format!("selected snippet key not found: {selected_key}"))?;
+    loop {
+        let config = load_config()?;
+        let options = build_picker_options(&config);
 
-    let text = resolve_snippet(selected)?;
-    clipboard::copy_to_clipboard(&text)?;
+        let Some(selected_key) = picker::pick_with(resolved_kind, &options)? else {
+            return Ok(());
+        };
 
-    if paste {
-        injector::paste(backend, keys, mode, &text)?;
+        #[cfg(feature = "gui")]
+        if selected_key == picker::EDIT_ACTION_VALUE {
+            edit_command()?;
+            continue;
+        }
+
+        let selected = config
+            .snippet
+            .iter()
+            .find(|s| s.key == selected_key)
+            .with_context(|| format!("selected snippet key not found: {selected_key}"))?;
+
+        let text = resolve_snippet(selected)?;
+        clipboard::copy_to_clipboard(&text)?;
+
+        if paste {
+            injector::paste(backend, keys, mode, target.as_ref(), &text)?;
+        }
+
+        return Ok(());
     }
-
-    Ok(())
 }
 
 fn list_command() -> Result<()> {
@@ -163,6 +170,11 @@ fn insert_command(
     mode: PasteMode,
 ) -> Result<()> {
     let config = load_config()?;
+    let target = if paste {
+        injector::capture_target(backend)?
+    } else {
+        None
+    };
 
     let selected = config
         .snippet
@@ -174,10 +186,27 @@ fn insert_command(
     clipboard::copy_to_clipboard(&text)?;
 
     if paste {
-        injector::paste(backend, keys, mode, &text)?;
+        injector::paste(backend, keys, mode, target.as_ref(), &text)?;
     }
 
     Ok(())
+}
+
+fn build_picker_options(config: &Config) -> Vec<PickerOption> {
+    let mut options = Vec::new();
+
+    #[cfg(feature = "gui")]
+    options.push(PickerOption {
+        label: "Edit snippets".to_string(),
+        value: picker::EDIT_ACTION_VALUE.to_string(),
+    });
+
+    options.extend(config.snippet.iter().map(|s| PickerOption {
+        label: format!("{}\t{}", s.key, s.name),
+        value: s.key.clone(),
+    }));
+
+    options
 }
 
 fn check_command(strict: bool) -> Result<()> {
@@ -205,10 +234,7 @@ fn check_command(strict: bool) -> Result<()> {
     report_tools("optional tools", tools::OPTIONAL);
 
     if strict && !required_missing.is_empty() {
-        anyhow::bail!(
-            "required tools missing: {}",
-            required_missing.join(", ")
-        );
+        anyhow::bail!("required tools missing: {}", required_missing.join(", "));
     }
 
     Ok(())

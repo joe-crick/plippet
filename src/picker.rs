@@ -57,7 +57,11 @@ impl PickerKind {
 #[derive(Debug, Clone)]
 pub struct PickerOption {
     pub label: String,
+    pub value: String,
 }
+
+#[cfg(feature = "gui")]
+pub const EDIT_ACTION_VALUE: &str = "__plippet_action_edit__";
 
 pub trait Picker {
     fn pick(&self, options: &[PickerOption]) -> Result<Option<String>>;
@@ -135,7 +139,7 @@ impl Picker for ExternalPicker {
 
         let output = child.wait_with_output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_selected_row(&stdout))
+        Ok(resolve_selected_value(&stdout, options))
     }
 }
 
@@ -260,6 +264,19 @@ fn parse_selected_row(stdout: &str) -> Option<String> {
     Some(key.to_string())
 }
 
+fn resolve_selected_value(stdout: &str, options: &[PickerOption]) -> Option<String> {
+    let selected = stdout.trim();
+    if selected.is_empty() {
+        return None;
+    }
+
+    if let Some(option) = options.iter().find(|option| option.label.trim() == selected) {
+        return Some(option.value.clone());
+    }
+
+    parse_selected_row(selected)
+}
+
 // ---------------------------------------------------------------------------
 // Built-in egui picker
 // ---------------------------------------------------------------------------
@@ -337,9 +354,7 @@ impl BuiltinPickerApp {
 
     fn commit(&self, filtered: &[usize], ctx: &egui::Context) {
         if let Some(&idx) = filtered.get(self.selected_index) {
-            let label = &self.options[idx].label;
-            let key = parse_selected_row(label).unwrap_or_else(|| label.clone());
-            *self.result.lock().unwrap() = Some(key);
+            *self.result.lock().unwrap() = Some(self.options[idx].value.clone());
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -487,6 +502,31 @@ mod tests {
         assert_eq!(parse_selected_row("k\tone\ttwo"), Some("k".to_string()));
     }
 
+    #[test]
+    #[cfg(feature = "gui")]
+    fn resolve_selected_value_prefers_exact_option_match() {
+        let options = vec![PickerOption {
+            label: "Edit snippets".to_string(),
+            value: EDIT_ACTION_VALUE.to_string(),
+        }];
+        assert_eq!(
+            resolve_selected_value("Edit snippets\n", &options),
+            Some(EDIT_ACTION_VALUE.to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_selected_value_falls_back_to_key_parsing() {
+        let options = vec![PickerOption {
+            label: "sig\tEmail signoff".to_string(),
+            value: "sig".to_string(),
+        }];
+        assert_eq!(
+            resolve_selected_value("sig\tEmail signoff\n", &options),
+            Some("sig".to_string())
+        );
+    }
+
     // --- picker_preferences ---------------------------------------------
 
     #[test]
@@ -611,6 +651,7 @@ mod tests {
     fn opt(label: &str) -> PickerOption {
         PickerOption {
             label: label.to_string(),
+            value: parse_selected_row(label).unwrap_or_else(|| label.to_string()),
         }
     }
 

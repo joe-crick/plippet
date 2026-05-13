@@ -52,6 +52,11 @@ pub enum PasteMode {
     Type,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteTarget {
+    x11_window_id: String,
+}
+
 // X11 keysym constants for the keys we synthesize via the portal. We use
 // keysyms (not evdev keycodes) on GNOME: empirically mutter's portal
 // implementation of `notify_keyboard_keycode` doesn't route the events
@@ -93,18 +98,11 @@ pub fn paste(
     backend: PasteBackend,
     keys: PasteKeys,
     mode: PasteMode,
+    target: Option<&PasteTarget>,
     text: &str,
 ) -> Result<()> {
-    // Give the compositor time both to observe the new clipboard selection
-    // and — more importantly on GNOME — to transfer keyboard focus from
-    // the picker window back to the previously-focused app. 25 ms is fine
-    // on wlroots compositors; GNOME's mutter takes substantially longer
-    // to settle focus after a regular xdg-shell window closes. 500 ms is
-    // still imperceptible as a hotkey latency and reliably catches the
-    // GNOME case observed so far.
-    thread::sleep(Duration::from_millis(500));
-
     let resolved = resolve(backend);
+    prepare_focus(resolved, target)?;
     match mode {
         PasteMode::Chord => match resolved {
             PasteBackend::Wtype => paste_chord_wtype(keys),
@@ -124,10 +122,79 @@ pub fn paste(
     }
 }
 
+pub fn capture_target(backend: PasteBackend) -> Result<Option<PasteTarget>> {
+    match resolve(backend) {
+        PasteBackend::Xdotool => Ok(Some(capture_x11_target()?)),
+        PasteBackend::Wtype | PasteBackend::Portal => Ok(None),
+        PasteBackend::Auto => unreachable!("resolve() never returns Auto"),
+    }
+}
+
 fn resolve(backend: PasteBackend) -> PasteBackend {
     match backend {
         PasteBackend::Auto => describe_auto().0,
         explicit => explicit,
+    }
+}
+
+fn prepare_focus(resolved: PasteBackend, target: Option<&PasteTarget>) -> Result<()> {
+    match resolved {
+        PasteBackend::Xdotool => {
+            if let Some(target) = target {
+                target.activate()?;
+            }
+            thread::sleep(Duration::from_millis(50));
+            Ok(())
+        }
+        PasteBackend::Wtype | PasteBackend::Portal => {
+            // Give the compositor time both to observe the new clipboard
+            // selection and — more importantly on GNOME — to transfer
+            // keyboard focus from the picker window back to the
+            // previously-focused app.
+            thread::sleep(Duration::from_millis(500));
+            Ok(())
+        }
+        PasteBackend::Auto => unreachable!("resolve() never returns Auto"),
+    }
+}
+
+fn capture_x11_target() -> Result<PasteTarget> {
+    let output = Command::new("xdotool")
+        .arg("getactivewindow")
+        .output()
+        .context("failed to spawn xdotool; install xdotool for X11 paste")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "xdotool getactivewindow exited with status {}",
+            output.status
+        );
+    }
+
+    let x11_window_id = parse_xdotool_window_id(&output.stdout)
+        .ok_or_else(|| anyhow!("xdotool getactivewindow returned no window id"))?;
+    Ok(PasteTarget { x11_window_id })
+}
+
+fn parse_xdotool_window_id(stdout: &[u8]) -> Option<String> {
+    let raw = String::from_utf8_lossy(stdout);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+impl PasteTarget {
+    fn activate(&self) -> Result<()> {
+        let status = Command::new("xdotool")
+            .args(["windowactivate", "--sync", &self.x11_window_id])
+            .status()
+            .context("failed to spawn xdotool for X11 focus restore")?;
+        if !status.success() {
+            anyhow::bail!("xdotool windowactivate exited with status {status}");
+        }
+        Ok(())
     }
 }
 
@@ -195,7 +262,7 @@ fn paste_chord_wtype(keys: PasteKeys) -> Result<()> {
 
 fn paste_chord_xdotool(keys: PasteKeys) -> Result<()> {
     let status = Command::new("xdotool")
-        .args(["key", keys.xdotool_key()])
+        .args(["key", "--clearmodifiers", keys.xdotool_key()])
         .status()
         .context("failed to spawn xdotool; install xdotool for X11 paste")?;
     if !status.success() {
@@ -231,7 +298,7 @@ fn paste_text_xdotool(text: &str) -> Result<()> {
     // A small per-character delay avoids xdotool overrunning the X server's
     // input queue for long snippets.
     let status = Command::new("xdotool")
-        .args(["type", "--delay", "5", "--", text])
+        .args(["type", "--clearmodifiers", "--delay", "5", "--", text])
         .status()
         .context("failed to spawn xdotool for type-mode paste")?;
     if !status.success() {
@@ -361,7 +428,10 @@ async fn paste_text_portal_async(text: &str) -> Result<()> {
     let step = Duration::from_millis(3);
     for c in text.chars() {
         let keysym = char_to_keysym(c).ok_or_else(|| {
-            anyhow!("character {c:?} (U+{:04X}) not supported in type mode", c as u32)
+            anyhow!(
+                "character {c:?} (U+{:04X}) not supported in type mode",
+                c as u32
+            )
         })?;
         proxy
             .notify_keyboard_keysym(&session, keysym, KeyState::Pressed)
@@ -409,8 +479,8 @@ fn validate_typeable(text: &str) -> Result<()> {
 }
 
 fn token_path() -> Result<PathBuf> {
-    let dirs = BaseDirs::new()
-        .ok_or_else(|| anyhow!("could not determine user config directory"))?;
+    let dirs =
+        BaseDirs::new().ok_or_else(|| anyhow!("could not determine user config directory"))?;
     Ok(dirs.config_dir().join("plippet").join("portal_token"))
 }
 
@@ -515,6 +585,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_xdotool_window_id_trims_output() {
+        assert_eq!(
+            parse_xdotool_window_id(b"12345678\n"),
+            Some("12345678".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_xdotool_window_id_rejects_empty_output() {
+        assert_eq!(parse_xdotool_window_id(b"  \n"), None);
+    }
+
     // ----- PasteKeys ------------------------------------------------------
 
     #[test]
@@ -539,9 +622,7 @@ mod tests {
         );
         assert_eq!(
             PasteKeys::CtrlShiftV.wtype_args(),
-            &[
-                "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"
-            ]
+            &["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
         );
     }
 
