@@ -40,22 +40,55 @@ delete `~/.config/plippet/portal_token`.
 
 ## Runtime dependencies
 
-Install via your package manager:
+Plippet auto-detects whether you're on a Wayland or X11 session
+(`XDG_SESSION_TYPE` + `WAYLAND_DISPLAY`) and picks the appropriate clipboard
+and paste tools. Install what matches your session:
+
+**Wayland sessions** (Sway, Hyprland, GNOME, KDE Plasma, river, labwc, …):
 
 - `wl-clipboard` — required (provides `wl-copy`)
-- One picker:
-  - `fuzzel` (default)
-  - `wofi`
-  - `rofi-wayland`
-  - `bemenu`
 - For `--paste`, one of:
-  - `wtype` — on wlroots compositors only
+  - `wtype` — wlroots compositors only (Sway/Hyprland/river/labwc)
   - `xdg-desktop-portal` plus a backend (`xdg-desktop-portal-gnome`,
-    `xdg-desktop-portal-kde`, or `xdg-desktop-portal-wlr`) — for the portal
-    backend, which Linked binaries call into automatically
+    `xdg-desktop-portal-kde`, or `xdg-desktop-portal-wlr`) — used by the
+    portal backend, called via D-Bus automatically
 
-Run `plippet check` to see which optional tools are present and which
-backend `auto` will resolve to on your current desktop.
+**X11 sessions** (XFCE, classic LXQt/Cinnamon, GNOME-on-Xorg, …):
+
+- `xclip` — required (clipboard)
+- `xdotool` — required if you want `--paste`
+
+**Picker** — plippet ships a built-in fuzzy picker (egui-based) that works
+on every compositor without any external dependency, so you don't *have*
+to install anything. External pickers are still supported if you prefer
+their look or speed:
+
+- `builtin` — bundled with plippet, requires the `gui` feature (default-on);
+  works on every Wayland compositor (GNOME, KDE, wlroots) and on X11.
+- `fuzzel` — wlroots only (uses `wlr-layer-shell`); will NOT run on GNOME or
+  KDE Plasma
+- `wofi` — wlroots only (same reason as fuzzel)
+- `bemenu` — wlroots Wayland mode; has X11/curses backends too
+- `rofi` — plain X11 rofi works via XWayland everywhere; **`rofi-wayland`
+  (the lbonn fork) also needs `wlr-layer-shell` and so doesn't work on
+  GNOME/KDE**
+
+`--picker auto` (the default) picks per-environment:
+
+- **wlroots Wayland** (Sway, Hyprland, river, labwc): `fuzzel` → `wofi` →
+  `bemenu` → `rofi` → `builtin`. Whatever's installed first wins.
+- **GNOME / KDE Wayland**: `builtin` first (categorically works) → `rofi`
+  (which may be the broken rofi-wayland fork on your distro). The built-in
+  is preferred because we can't tell plain rofi from rofi-wayland by binary
+  name alone.
+- **X11**: `rofi` → `builtin`. Plain X11 rofi is fast and reliable here.
+
+Pass an explicit `--picker <name>` to override. `--picker builtin` always
+works.
+
+Run `plippet check` to see which session was detected, which paste backend
+`auto` will resolve to, which picker `auto` will resolve to, and which
+external tools are present on your system.
 
 ## Build & install
 
@@ -113,10 +146,11 @@ cp examples/snippets.toml ~/.config/plippet/snippets.toml
 ## Commands
 
 ```
-plippet pick   [--picker fuzzel|wofi|rofi|bemenu] [--paste] [--paste-backend auto|wtype|portal]
+plippet pick   [--picker auto|builtin|fuzzel|wofi|rofi|bemenu] [--paste] [--paste-backend auto|wtype|portal|xdotool]
 plippet list
-plippet insert <key> [--paste] [--paste-backend auto|wtype|portal]
+plippet insert <key> [--paste] [--paste-backend auto|wtype|portal|xdotool]
 plippet check  [--strict]
+plippet edit                          # requires the `gui` feature (default-on)
 ```
 
 - **pick** — open the fuzzy picker; the selected snippet is copied (and
@@ -127,6 +161,28 @@ plippet check  [--strict]
   list tool availability. Exits 0 as long as the config is valid. Pass
   `--strict` to also fail when required runtime tools (currently just
   `wl-copy`) are missing — useful in CI.
+- **edit** — open the snippet-manager GUI (see next section).
+
+## Snippet manager GUI
+
+`plippet edit` opens a small window for adding, editing, renaming, and
+deleting snippets without hand-editing TOML.
+
+- Click **➕ Add snippet** to create a new row. It's pre-filled with a fresh
+  unique key (`new`, `new-2`, `new-3`, …) so the row is valid as-is — just
+  retype the key/name to taste.
+- The **✕** button on each row asks for confirmation before deleting.
+- **↻ Revert** reloads from disk; if you have unsaved changes it asks first.
+- **💾 Save** (or `Ctrl+S`) writes `~/.config/plippet/snippets.toml`
+  atomically (write to a temp file, then rename).
+- Closing the window with unsaved changes pops a Save / Discard & quit /
+  Cancel modal — you won't lose work by missing the dirty indicator.
+- The bottom status bar shows live validation; Save is disabled while
+  validation is failing.
+
+If you don't want the GUI in your build, compile with
+`cargo build --release --no-default-features`. The `edit` subcommand will be
+absent but everything else works unchanged.
 
 ## Compositor bindings
 
@@ -138,11 +194,18 @@ Bind a shortcut (e.g. `Super+;`) to:
 plippet pick --paste
 ```
 
-`--paste-backend auto` will pick `portal` on GNOME automatically.
+`--picker auto` (default) detects GNOME Wayland's lack of `wlr-layer-shell`
+and uses the built-in egui picker — no external dependency to install.
+`--paste-backend auto` picks the portal backend.
 
 ### KDE Plasma (System Settings → Shortcuts → Custom Shortcuts)
 
-Same — bind to `plippet pick --paste`.
+Same as GNOME — Plasma's Wayland session also lacks `wlr-layer-shell`, and
+`--picker auto` falls back to the built-in picker:
+
+```
+plippet pick --paste
+```
 
 ### Sway (`~/.config/sway/config`)
 
@@ -155,6 +218,33 @@ bindsym $mod+semicolon exec plippet pick --paste
 ```
 bind = SUPER, SEMICOLON, exec, plippet pick --paste
 ```
+
+### XFCE (Settings → Keyboard → Application Shortcuts)
+
+Add a new shortcut and set the command to:
+
+```
+plippet pick --paste
+```
+
+Then press the key combination you want to bind (e.g. `Super+;`).
+
+Equivalent from the command line:
+
+```sh
+xfconf-query -c xfce4-keyboard-shortcuts \
+  -p '/commands/custom/<Super>semicolon' \
+  -n -t string -s 'plippet pick --paste'
+```
+
+XFCE typically runs on X11, and plippet detects this via
+`XDG_SESSION_TYPE` / absent `WAYLAND_DISPLAY`. With `xclip` and `xdotool`
+installed, `plippet pick --paste` works end-to-end on X11 — clipboard via
+`xclip`, paste via `xdotool key ctrl+v`. `rofi` is X11-native here, so the
+picker also works without any tricks.
+
+If you're running XFCE on a Wayland session (e.g. via `labwc`), the Wayland
+tools (`wl-clipboard` + `wtype` / portal) are used instead, automatically.
 
 Reload your compositor/session config, then press the binding inside a text
 field. On GNOME/KDE, the first press will prompt for portal permission;

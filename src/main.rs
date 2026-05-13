@@ -1,5 +1,7 @@
 mod clipboard;
 mod config;
+#[cfg(feature = "gui")]
+mod gui;
 mod injector;
 mod picker;
 mod snippet;
@@ -10,7 +12,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::Config;
 use crate::injector::PasteBackend;
-use crate::picker::{ExternalPicker, Picker, PickerKind, PickerOption};
+use crate::picker::{PickerKind, PickerOption};
 use crate::snippet::resolve_snippet;
 
 #[derive(Debug, Parser)]
@@ -24,7 +26,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Pick {
-        #[arg(long, value_enum, default_value_t = PickerKind::Fuzzel)]
+        #[arg(long, value_enum, default_value_t = PickerKind::Auto)]
         picker: PickerKind,
 
         #[arg(long)]
@@ -47,6 +49,9 @@ enum Commands {
         #[arg(long)]
         strict: bool,
     },
+    /// Open the snippet manager GUI.
+    #[cfg(feature = "gui")]
+    Edit,
 }
 
 fn main() -> Result<()> {
@@ -65,7 +70,15 @@ fn main() -> Result<()> {
             paste_backend,
         } => insert_command(&key, paste, paste_backend),
         Commands::Check { strict } => check_command(strict),
+        #[cfg(feature = "gui")]
+        Commands::Edit => edit_command(),
     }
+}
+
+#[cfg(feature = "gui")]
+fn edit_command() -> anyhow::Result<()> {
+    let path = Config::default_path()?;
+    gui::run(path)
 }
 
 fn load_config() -> Result<Config> {
@@ -77,6 +90,11 @@ fn load_config() -> Result<Config> {
 fn pick_command(kind: PickerKind, paste: bool, backend: PasteBackend) -> Result<()> {
     let config = load_config()?;
 
+    let resolved_kind = match kind {
+        PickerKind::Auto => picker::auto_pick()?,
+        explicit => explicit,
+    };
+
     let options: Vec<PickerOption> = config
         .snippet
         .iter()
@@ -85,8 +103,7 @@ fn pick_command(kind: PickerKind, paste: bool, backend: PasteBackend) -> Result<
         })
         .collect();
 
-    let picker = ExternalPicker::new(kind);
-    let Some(selected_key) = picker.pick(&options)? else {
+    let Some(selected_key) = picker::pick_with(resolved_kind, &options)? else {
         return Ok(());
     };
 
@@ -139,16 +156,24 @@ fn check_command(strict: bool) -> Result<()> {
     let path = Config::default_path()?;
     let config = load_config()?;
 
+    let session = tools::session_kind();
+    println!("session: {session}");
     println!(
         "config ok: {} snippets ({})",
         config.snippet.len(),
         path.display()
     );
 
-    let (resolved, reason) = injector::describe_auto();
-    println!("paste backend (auto resolves to): {resolved:?}  [{reason}]");
+    let (paste_resolved, paste_reason) = injector::describe_auto();
+    println!("paste backend (auto resolves to): {paste_resolved:?}  [{paste_reason}]");
+    let (picker_resolved, picker_reason) = picker::describe_auto_picker();
+    let picker_label = match picker_resolved {
+        Some(k) => format!("{k:?}"),
+        None => "<none installed>".to_string(),
+    };
+    println!("picker (auto resolves to): {picker_label}  [{picker_reason}]");
 
-    let required_missing = report_tools("required tools", tools::REQUIRED);
+    let required_missing = report_tools("required tools", tools::required_for(session));
     report_tools("optional tools", tools::OPTIONAL);
 
     if strict && !required_missing.is_empty() {
