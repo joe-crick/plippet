@@ -1,0 +1,20 @@
+[[snippet]]
+key = "sig"
+name = "Email signoff"
+body = """
+Best,
+J
+"""
+
+[[snippet]]
+key = "addr"
+name = "Address"
+body = """
+123 Example Street
+Berlin
+"""
+
+[[snippet]]
+key = "today"
+name = "Today's date"
+command = "date +%Y-%m-%d"

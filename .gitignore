@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target
+
+# JetBrains IDEs (WebStorm / RustRover / IntelliJ)
+/.idea/
+
+# VS Code
+/.vscode/
+
+# OS noise
+.DS_Store
+
+# Editor backups / swap files
+*.swp
+*~

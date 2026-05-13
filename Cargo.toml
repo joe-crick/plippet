@@ -1,0 +1,15 @@
+[package]
+name = "plippet"
+version = "0.1.0"
+edition = "2021"
+description = "A small Wayland-friendly hotkey snippet picker"
+license = "MIT"
+
+[dependencies]
+anyhow      = "1"
+ashpd       = "0.12"
+clap        = { version = "4", features = ["derive"] }
+directories = "5"
+serde       = { version = "1", features = ["derive"] }
+tokio       = { version = "1", features = ["rt"] }
+toml        = "0.8"
