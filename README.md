@@ -28,6 +28,10 @@ window.
 falls back to `wtype` otherwise. Override with `--paste-backend wtype` or
 `--paste-backend portal` if the heuristic guesses wrong.
 
+On X11, plippet captures the focused window before opening the picker and
+re-activates that window immediately before pasting. That is what makes
+`plippet pick --paste` behave like a real snippet inserter on XFCE/Xorg.
+
 ### Portal first-run
 
 The very first time you trigger a paste through the portal backend, your
@@ -56,7 +60,9 @@ and paste tools. Install what matches your session:
 **X11 sessions** (XFCE, classic LXQt/Cinnamon, GNOME-on-Xorg, …):
 
 - `xclip` — required (clipboard)
-- `xdotool` — required if you want `--paste`
+- `xdotool` — required for X11 snippet insertion via `--paste`; plippet
+  uses it both to re-focus the original X11 window and to synthesize the
+  paste/type event
 
 **Picker** — plippet ships a built-in fuzzy picker (egui-based) that works
 on every compositor without any external dependency, so you don't *have*
@@ -272,8 +278,9 @@ xfconf-query -c xfce4-keyboard-shortcuts \
 XFCE typically runs on X11, and plippet detects this via
 `XDG_SESSION_TYPE` / absent `WAYLAND_DISPLAY`. With `xclip` and `xdotool`
 installed, `plippet pick --paste` works end-to-end on X11 — clipboard via
-`xclip`, paste via `xdotool key ctrl+v`. `rofi` is X11-native here, so the
-picker also works without any tricks.
+`xclip`, then focus is restored to the original window and paste happens via
+`xdotool`. `rofi` is X11-native here, so the picker also works without any
+tricks.
 
 If you're running XFCE on a Wayland session (e.g. via `labwc`), the Wayland
 tools (`wl-clipboard` + `wtype` / portal) are used instead, automatically.

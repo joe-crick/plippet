@@ -125,6 +125,12 @@ fn pick_command(
         })
         .collect();
 
+    let target = if paste {
+        injector::capture_target(backend)?
+    } else {
+        None
+    };
+
     let Some(selected_key) = picker::pick_with(resolved_kind, &options)? else {
         return Ok(());
     };
@@ -139,7 +145,7 @@ fn pick_command(
     clipboard::copy_to_clipboard(&text)?;
 
     if paste {
-        injector::paste(backend, keys, mode, &text)?;
+        injector::paste(backend, keys, mode, target.as_ref(), &text)?;
     }
 
     Ok(())
@@ -163,6 +169,11 @@ fn insert_command(
     mode: PasteMode,
 ) -> Result<()> {
     let config = load_config()?;
+    let target = if paste {
+        injector::capture_target(backend)?
+    } else {
+        None
+    };
 
     let selected = config
         .snippet
@@ -174,7 +185,7 @@ fn insert_command(
     clipboard::copy_to_clipboard(&text)?;
 
     if paste {
-        injector::paste(backend, keys, mode, &text)?;
+        injector::paste(backend, keys, mode, target.as_ref(), &text)?;
     }
 
     Ok(())
@@ -205,10 +216,7 @@ fn check_command(strict: bool) -> Result<()> {
     report_tools("optional tools", tools::OPTIONAL);
 
     if strict && !required_missing.is_empty() {
-        anyhow::bail!(
-            "required tools missing: {}",
-            required_missing.join(", ")
-        );
+        anyhow::bail!("required tools missing: {}", required_missing.join(", "));
     }
 
     Ok(())
