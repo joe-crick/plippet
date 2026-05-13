@@ -160,7 +160,10 @@ plippet edit                          # requires the `gui` feature (default-on)
 ```
 
 - **pick** — open the fuzzy picker; the selected snippet is copied (and
-  pasted if `--paste`). Cancelling the picker (ESC) exits 0 silently.
+  pasted if `--paste`). When built with the default `gui` feature, the
+  picker also includes an **Edit snippets** action that opens the snippet
+  editor and then returns to the picker. Cancelling the picker (ESC) exits
+  0 silently.
 - **list** — print all snippets as `key<TAB>name`.
 - **insert** — resolve a snippet by key and copy it (and paste if `--paste`).
 - **`--paste-keys`** (on `pick` and `insert`) — choose the synthesized
@@ -187,6 +190,10 @@ plippet edit                          # requires the `gui` feature (default-on)
 
 `plippet edit` opens a small window for adding, editing, renaming, and
 deleting snippets without hand-editing TOML.
+
+You can also open this editor directly from the normal `plippet pick`
+selector via the **Edit snippets** row, including external pickers such as
+`rofi`.
 
 - Click **➕ Add snippet** to create a new row. It's pre-filled with a fresh
   unique key (`new`, `new-2`, `new-3`, …) so the row is valid as-is — just

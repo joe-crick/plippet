@@ -262,7 +262,7 @@ fn paste_chord_wtype(keys: PasteKeys) -> Result<()> {
 
 fn paste_chord_xdotool(keys: PasteKeys) -> Result<()> {
     let status = Command::new("xdotool")
-        .args(["key", keys.xdotool_key()])
+        .args(["key", "--clearmodifiers", keys.xdotool_key()])
         .status()
         .context("failed to spawn xdotool; install xdotool for X11 paste")?;
     if !status.success() {
@@ -298,7 +298,7 @@ fn paste_text_xdotool(text: &str) -> Result<()> {
     // A small per-character delay avoids xdotool overrunning the X server's
     // input queue for long snippets.
     let status = Command::new("xdotool")
-        .args(["type", "--delay", "5", "--", text])
+        .args(["type", "--clearmodifiers", "--delay", "5", "--", text])
         .status()
         .context("failed to spawn xdotool for type-mode paste")?;
     if !status.success() {
